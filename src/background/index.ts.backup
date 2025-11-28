@@ -1,0 +1,663 @@
+// Background Service Worker (MV3)
+// Handles coordination between popup and content scripts
+
+import { MessageType, MessageResponse, sendMessage, getActiveTabId } from '../lib/messages';
+import { goalToSteps, resolveRecipeVariables, getRecipe, ReActStep } from '../lib/planner';
+
+console.log('🤖 Agentic Web Assistant - Background Service Worker Loaded');
+
+// ============================================================================
+// AGENT STATE
+// ============================================================================
+
+interface AgentState {
+    running: boolean;
+    currentStep: number;
+    totalSteps: number;
+    goal: string;
+    dryRun: boolean;
+    trace: ReActStep[];
+    recipeId?: string;
+}
+
+let agentState: AgentState = {
+    running: false,
+    currentStep: 0,
+    totalSteps: 0,
+    goal: '',
+    dryRun: false,
+    trace: [],
+};
+
+let stopRequested = false;
+
+// ============================================================================
+// MESSAGE HANDLERS
+// ============================================================================
+
+/**
+ * Wait for content script to be ready (it's auto-injected via manifest.json)
+ */
+async function ensureContentScriptInjected(_tabId: number): Promise<boolean> {
+    try {
+        // Content script is auto-injected by manifest.json
+        // Just wait a moment for it to initialize
+        await new Promise(resolve => setTimeout(resolve, 500));
+        return true;
+    } catch (error: any) {
+        console.error('Content script check failed:', error);
+        return false;
+    }
+}
+
+/**
+ * Execute a tool on the active tab
+ */
+async function executeTool(tool: string, args: any, timeout: number = 30000): Promise<MessageResponse> {
+    try {
+        const tabId = await getActiveTabId();
+
+        if (!tabId) {
+            return {
+                success: false,
+                error: 'No active tab found',
+            };
+        }
+
+        // Special handling for navigate - use chrome.tabs.update instead of content script
+        if (tool === 'navigate') {
+            try {
+                const chromeApi = (globalThis as any).chrome;
+                const { url } = args;
+
+                // Navigate the tab using Chrome API
+                await chromeApi.tabs.update(tabId, { url });
+
+                // Wait for navigation to complete
+                await new Promise((resolve) => {
+                    const listener = (tid: number, info: any) => {
+                        if (tid === tabId && info.status === 'complete') {
+                            chromeApi.tabs.onUpdated.removeListener(listener);
+                            resolve(true);
+                        }
+                    };
+                    chromeApi.tabs.onUpdated.addListener(listener);
+
+                    // Timeout after 30 seconds
+                    setTimeout(() => {
+                        chromeApi.tabs.onUpdated.removeListener(listener);
+                        resolve(true);
+                    }, timeout);
+                });
+
+                return {
+                    success: true,
+                    data: { url, navigated: true },
+                };
+            } catch (error: any) {
+                return {
+                    success: false,
+                    error: `Navigation failed: ${error.message}`,
+                };
+            }
+        }
+
+        // For other tools, ensure content script is injected
+        const injected = await ensureContentScriptInjected(tabId);
+        if (!injected) {
+            return {
+                success: false,
+                error: 'Failed to inject content script',
+            };
+        }
+
+        const message = {
+            type: MessageType.EXECUTE_TOOL,
+            payload: { tool, args, timeout },
+        } as any;
+
+        const response = await sendMessage(message, { tabId, timeout });
+        return response;
+    } catch (error: any) {
+        return {
+            success: false,
+            error: `Tool execution failed: ${error.message}`,
+        };
+    }
+}
+
+/**
+ * Execute the ReAct loop
+ */
+async function executeReActLoop(steps: ReActStep[], maxSteps: number = 20, dryRun: boolean = false): Promise<void> {
+    agentState.totalSteps = Math.min(steps.length, maxSteps);
+    agentState.currentStep = 0;
+    agentState.trace = [];
+    stopRequested = false;
+
+    console.log(`🚀 Starting ReAct loop with ${steps.length} steps (max: ${maxSteps}, dryRun: ${dryRun})`);
+
+    for (let i = 0; i < steps.length && i < maxSteps; i++) {
+        // Check for stop request
+        if (stopRequested) {
+            console.log('🛑 Stop requested, halting execution');
+            agentState.running = false;
+            break;
+        }
+
+        const step = steps[i];
+        agentState.currentStep = i + 1;
+
+        console.log(`📍 Step ${step.step}: ${step.thought}`);
+        console.log(`🔧 Action: ${step.action.tool}`, step.action.args);
+
+        // Add to trace with thought and action
+        const traceStep: ReActStep = {
+            step: step.step,
+            thought: step.thought,
+            action: step.action,
+            observation: '',
+        };
+
+        if (dryRun) {
+            // Dry run mode - simulate without executing
+            traceStep.observation = `[DRY RUN] Would execute ${step.action.tool} with args: ${JSON.stringify(step.action.args)}`;
+            console.log(`🏃 ${traceStep.observation}`);
+        } else {
+            // Execute the tool
+            const result = await executeTool(step.action.tool, step.action.args);
+
+            if (result.success) {
+                const data = result.data?.data || result.data;
+                traceStep.observation = `✅ Success: ${JSON.stringify(data)}`;
+                console.log(`✅ ${traceStep.observation}`);
+            } else {
+                traceStep.observation = `❌ Error: ${result.error}`;
+                console.error(`❌ ${traceStep.observation}`);
+
+                // Continue on error but log it
+            }
+        }
+
+        agentState.trace.push(traceStep);
+
+        // Small delay between steps
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    console.log('🏁 ReAct loop completed');
+    agentState.running = false;
+}
+
+/**
+ * Start the agent
+ */
+async function startAgent(payload: {
+    goal?: string;
+    recipeId?: string;
+    variables?: Record<string, string>;
+    dryRun?: boolean;
+    maxSteps?: number
+}): Promise<MessageResponse> {
+    if (agentState.running) {
+        return {
+            success: false,
+            error: 'Agent is already running',
+        };
+    }
+
+    let steps: ReActStep[] = [];
+
+    // Use recipe or goal-based planning
+    if (payload.recipeId) {
+        const recipe = getRecipe(payload.recipeId);
+        if (!recipe) {
+            return {
+                success: false,
+                error: `Recipe not found: ${payload.recipeId}`,
+            };
+        }
+        steps = resolveRecipeVariables(recipe, payload.variables || {});
+        agentState.goal = recipe.name;
+        agentState.recipeId = payload.recipeId;
+    } else if (payload.goal) {
+        steps = goalToSteps(payload.goal);
+        agentState.goal = payload.goal;
+    } else {
+        return {
+            success: false,
+            error: 'No goal or recipe provided',
+        };
+    }
+
+    agentState.running = true;
+    agentState.dryRun = payload.dryRun || false;
+    agentState.currentStep = 0;
+    agentState.totalSteps = 0;
+    agentState.trace = [];
+
+    console.log('🚀 Agent started:', agentState);
+
+    // Execute in background (don't await)
+    executeReActLoop(steps, payload.maxSteps || 20, agentState.dryRun).catch((error) => {
+        console.error('❌ ReAct loop error:', error);
+        agentState.running = false;
+    });
+
+    return {
+        success: true,
+        data: { state: agentState },
+    };
+}
+
+/**
+ * Stop the agent
+ */
+async function stopAgent(): Promise<MessageResponse> {
+    if (!agentState.running) {
+        return {
+            success: false,
+            error: 'Agent is not running',
+        };
+    }
+
+    stopRequested = true;
+    console.log('🛑 Agent stop requested');
+
+    // Wait a bit for graceful shutdown
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    agentState.running = false;
+
+    return {
+        success: true,
+        data: { state: agentState },
+    };
+}
+
+/**
+ * Get agent status
+ */
+async function getAgentStatus(): Promise<MessageResponse> {
+    return {
+        success: true,
+        data: {
+            running: agentState.running,
+            currentStep: agentState.currentStep,
+            totalSteps: agentState.totalSteps,
+            goal: agentState.goal,
+            dryRun: agentState.dryRun,
+        },
+    };
+}
+
+/**
+ * Toggle selector picker on active tab
+ */
+async function togglePicker(enabled: boolean): Promise<MessageResponse> {
+    try {
+        const tabId = await getActiveTabId();
+
+        if (!tabId) {
+            return {
+                success: false,
+                error: 'No active tab found',
+            };
+        }
+
+        const message = {
+            type: MessageType.TOGGLE_PICKER,
+            payload: { enabled },
+        } as any;
+
+        const response = await sendMessage(message, { tabId, timeout: 5000 });
+        return response;
+    } catch (error: any) {
+        return {
+            success: false,
+            error: `Picker toggle failed: ${error.message}`,
+        };
+    }
+}
+
+/**
+ * Get current trace
+ */
+async function getTrace(): Promise<MessageResponse> {
+    return {
+        success: true,
+        data: { trace: agentState.trace },
+    };
+}
+
+/**
+ * Save trace to storage
+ */
+async function saveTrace(trace: any): Promise<MessageResponse> {
+    try {
+        // TODO: Implement persistent storage in Step 5
+        console.log('💾 Save trace:', trace);
+
+        return {
+            success: true,
+            data: { saved: true },
+        };
+    } catch (error: any) {
+        return {
+            success: false,
+            error: `Save trace failed: ${error.message}`,
+        };
+    }
+}
+
+/**
+ * Clear all traces
+ */
+async function clearTraces(): Promise<MessageResponse> {
+    agentState.trace = [];
+    return {
+        success: true,
+        data: { cleared: true },
+    };
+}
+
+// ============================================================================
+// MESSAGE LISTENER
+// ============================================================================
+
+(globalThis as any).chrome.runtime.onMessage.addListener((message: any, _sender: any, sendResponse: (response: MessageResponse) => void) => {
+    console.log('📨 Background received message:', message);
+
+    // Handle different message types
+    (async () => {
+        try {
+            let response: MessageResponse;
+
+            switch (message.type) {
+                case MessageType.EXECUTE_TOOL:
+                    response = await executeTool(message.payload.tool, message.payload.args, message.payload.timeout);
+                    break;
+
+                case MessageType.START_AGENT:
+                    response = await startAgent(message.payload);
+                    break;
+
+                case MessageType.STOP_AGENT:
+                    /**
+                     * Start the agent
+                     */
+                    async function startAgent(payload: {
+                        goal?: string;
+                        recipeId?: string;
+                        variables?: Record<string, string>;
+                        dryRun?: boolean;
+                        maxSteps?: number
+                    }): Promise<MessageResponse> {
+                        if (agentState.running) {
+                            return {
+                                success: false,
+                                error: 'Agent is already running',
+                            };
+                        }
+
+                        let steps: ReActStep[] = [];
+
+                        // Use recipe or goal-based planning
+                        if (payload.recipeId) {
+                            const recipe = getRecipe(payload.recipeId);
+                            if (!recipe) {
+                                return {
+                                    success: false,
+                                    error: `Recipe not found: ${payload.recipeId}`,
+                                };
+                            }
+                            steps = resolveRecipeVariables(recipe, payload.variables || {});
+                            agentState.goal = recipe.name;
+                            agentState.recipeId = payload.recipeId;
+                        } else if (payload.goal) {
+                            steps = goalToSteps(payload.goal);
+                            agentState.goal = payload.goal;
+                        } else {
+                            return {
+                                success: false,
+                                error: 'No goal or recipe provided',
+                            };
+                        }
+
+                        agentState.running = true;
+                        agentState.dryRun = payload.dryRun || false;
+                        agentState.currentStep = 0;
+                        agentState.totalSteps = 0;
+                        agentState.trace = [];
+
+                        console.log('🚀 Agent started:', agentState);
+
+                        // Execute in background (don't await)
+                        executeReActLoop(steps, payload.maxSteps || 20, agentState.dryRun).catch((error) => {
+                            console.error('❌ ReAct loop error:', error);
+                            agentState.running = false;
+                        });
+
+                        return {
+                            success: true,
+                            data: { state: agentState },
+                        };
+                    }
+
+                    /**
+                     * Stop the agent
+                     */
+                    async function stopAgent(): Promise<MessageResponse> {
+                        if (!agentState.running) {
+                            return {
+                                success: false,
+                                error: 'Agent is not running',
+                            };
+                        }
+
+                        stopRequested = true;
+                        console.log('🛑 Agent stop requested');
+
+                        // Wait a bit for graceful shutdown
+                        await new Promise(resolve => setTimeout(resolve, 100));
+
+                        agentState.running = false;
+
+                        return {
+                            success: true,
+                            data: { state: agentState },
+                        };
+                    }
+
+                    /**
+                     * Get agent status
+                     */
+                    async function getAgentStatus(): Promise<MessageResponse> {
+                        return {
+                            success: true,
+                            data: {
+                                running: agentState.running,
+                                currentStep: agentState.currentStep,
+                                totalSteps: agentState.totalSteps,
+                                goal: agentState.goal,
+                                dryRun: agentState.dryRun,
+                            },
+                        };
+                    }
+
+                    /**
+                     * Toggle selector picker on active tab
+                     */
+                    async function togglePicker(enabled: boolean): Promise<MessageResponse> {
+                        try {
+                            const tabId = await getActiveTabId();
+
+                            if (!tabId) {
+                                return {
+                                    success: false,
+                                    error: 'No active tab found',
+                                };
+                            }
+
+                            const message = {
+                                type: MessageType.TOGGLE_PICKER,
+                                payload: { enabled },
+                            } as any;
+
+                            const response = await sendMessage(message, { tabId, timeout: 5000 });
+                            return response;
+                        } catch (error: any) {
+                            return {
+                                success: false,
+                                error: `Picker toggle failed: ${error.message}`,
+                            };
+                        }
+                    }
+
+                    /**
+                     * Get current trace
+                     */
+                    async function getTrace(): Promise<MessageResponse> {
+                        return {
+                            success: true,
+                            data: { trace: agentState.trace },
+                        };
+                    }
+
+                    /**
+                     * Save trace to storage
+                     */
+                    async function saveTrace(trace: any): Promise<MessageResponse> {
+                        try {
+                            // TODO: Implement persistent storage in Step 5
+                            console.log('💾 Save trace:', trace);
+
+                            return {
+                                success: true,
+                                data: { saved: true },
+                            };
+                        } catch (error: any) {
+                            return {
+                                success: false,
+                                error: `Save trace failed: ${error.message}`,
+                            };
+                        }
+                    }
+
+                    /**
+                     * Clear all traces
+                     */
+                    async function clearTraces(): Promise<MessageResponse> {
+                        agentState.trace = [];
+                        return {
+                            success: true,
+                            data: { cleared: true },
+                        };
+                    }
+
+                    // ============================================================================
+                    // MESSAGE LISTENER
+                    // ============================================================================
+
+                    (globalThis as any).chrome.runtime.onMessage.addListener((message: any, _sender: any, sendResponse: (response: MessageResponse) => void) => {
+                        console.log('📨 Background received message:', message);
+
+                        // Handle different message types
+                        (async () => {
+                            try {
+                                let response: MessageResponse;
+
+                                switch (message.type) {
+                                    case MessageType.EXECUTE_TOOL:
+                                        response = await executeTool(message.payload.tool, message.payload.args, message.payload.timeout);
+                                        break;
+
+                                    case MessageType.START_AGENT:
+                                        response = await startAgent(message.payload);
+                                        break;
+
+                                    case MessageType.STOP_AGENT:
+                                        response = await stopAgent();
+                                        break;
+
+                                    case MessageType.AGENT_STATUS:
+                                        response = await getAgentStatus();
+                                        break;
+
+                                    case MessageType.TOGGLE_PICKER:
+                                        response = await togglePicker(message.payload.enabled);
+                                        break;
+
+                                    case MessageType.VALIDATE_SELECTOR:
+                                        response = {
+                                            success: true,
+                                            ...(await executeTool('validateSelector', { selector: message.payload.selector }))
+                                        };
+                                        break;
+
+                                    case MessageType.AUTO_FILL:
+                                        // Load user profile from storage
+                                        const profile = await new Promise<any>((resolve) => {
+                                            chrome.storage.local.get(['userProfile'], (result) => {
+                                                resolve(result.userProfile || {});
+                                            });
+                                        });
+
+                                        // Check if profile exists
+                                        if (!profile.firstName && !profile.email) {
+                                            response = {
+                                                success: false,
+                                                error: 'Please set up your profile in Settings first (right-click extension → Options → Profile)'
+                                            };
+                                        } else {
+                                            // Execute auto-fill tool
+                                            response = await executeTool('autoFill', { profile });
+                                        }
+                                        break;
+
+                                    case MessageType.GET_TRACE:
+                                        response = await getTrace();
+                                        break;
+
+                                    case MessageType.SAVE_TRACE:
+                                        response = await saveTrace(message.payload);
+                                        break;
+
+                                    case MessageType.CLEAR_TRACES:
+                                        response = await clearTraces();
+                                        break;
+
+                                    default:
+                                        response = {
+                                            success: false,
+                                            error: `Unknown message type: ${message.type}`,
+                                        };
+                                }
+
+                                sendResponse(response);
+                            } catch (error: any) {
+                                sendResponse({
+                                    success: false,
+                                    error: error.message,
+                                });
+                            }
+                        })();
+
+                        return true; // async response
+                    });
+
+                    // ============================================================================
+                    // EXTENSION LIFECYCLE
+                    // ============================================================================
+
+                    (globalThis as any).chrome.runtime.onInstalled.addListener((details: any) => {
+                        console.log('📦 Extension installed/updated:', details.reason);
+
+                        if (details.reason === 'install') {
+                            console.log('🎉 Welcome to Agentic Web Assistant!');
+                        }
+                    });
+
+                    console.log('✅ Background service worker ready');
+
+                    export { };

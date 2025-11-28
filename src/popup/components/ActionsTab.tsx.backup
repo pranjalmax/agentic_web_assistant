@@ -1,0 +1,428 @@
+import { useState } from 'react';
+import { motion } from 'framer-motion';
+import { Sparkles, Table, Link, DollarSign, Mail, FormInput, FileText } from 'lucide-react';
+import { MessageType } from '../../lib/messages';
+
+interface Action {
+    id: string;
+    icon: React.ReactNode;
+    title: string;
+    description: string;
+    handler: () => void;
+}
+
+const ActionsTab = () => {
+    const [loading, setLoading] = useState(false);
+    const [result, setResult] = useState<{ success: boolean; message: string; details?: string } | null>(null);
+    const [extractedData, setExtractedData] = useState<any>(null);
+
+    const handleAutoFill = async () => {
+        setLoading(true);
+        setResult(null);
+
+        try {
+            const response = await (globalThis as any).chrome.runtime.sendMessage({
+                type: 'AUTO_FILL',
+            });
+
+            if (response.success) {
+                // Extract filled count from nested response
+                const actualData = response.data?.data || response.data || {};
+                const filledCount = actualData.filled || 0;
+                const totalCount = actualData.total || 0;
+
+                setResult({
+                    success: true,
+                    message: `✅ Filled ${filledCount} field${filledCount !== 1 ? 's' : ''} successfully!`,
+                    details: `${filledCount} out of ${totalCount} input fields were filled.`
+                });
+            } else {
+                setResult({
+                    success: false,
+                    message: `❌ ${response.error || 'Failed to auto-fill form'}`
+                });
+            }
+        } catch (error: any) {
+            setResult({
+                success: false,
+                message: `❌ Error: ${error.message}`
+            });
+        } finally {
+            setLoading(false);
+        }
+    };
+
+
+    const handleSummarize = async () => {
+        setLoading(true);
+        setResult(null);
+        setExtractedData(null);
+
+        try {
+            const response = await (globalThis as any).chrome.runtime.sendMessage({
+                type: MessageType.EXECUTE_TOOL,
+                payload: { tool: 'summarizePage', args: {} }
+            });
+
+            if (response.success && response.data.success) {
+                const data = response.data.data;
+                const stats = data.stats;
+
+                // Store for copying
+                setExtractedData(data);
+
+                setResult({
+                    success: true,
+                    message: `✅ Page Summary`,
+                    details: `${stats.words} words, ${stats.characters} chars\n${stats.headings} headings, ${stats.images} images, ${stats.links} links`
+                });
+            } else {
+                setResult({
+                    success: false,
+                    message: `❌ ${response.error || response.data?.error || 'Failed to summarize'}`,
+                });
+                setExtractedData(null);
+            }
+        } catch (error: any) {
+            setResult({
+                success: false,
+                message: `❌ Error: ${error.message}`,
+            });
+            setExtractedData(null);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleExtractTables = async () => {
+        setLoading(true);
+        setResult(null);
+        setExtractedData(null);
+
+        try {
+            const response = await (globalThis as any).chrome.runtime.sendMessage({
+                type: MessageType.EXECUTE_TOOL,
+                payload: { tool: 'extractTables', args: {} }
+            });
+
+            if (response.success && response.data.success) {
+                const data = response.data.data;
+                const found = data.found || 0;
+
+                if (found === 0) {
+                    setResult({
+                        success: false,
+                        message: '❌ No tables found on this page',
+                    });
+                    setExtractedData(null);
+                } else {
+                    // Calculate total rows across all tables
+                    const totalRows = data.tables.reduce((sum: number, t: any) => sum + t.rowCount, 0);
+
+                    // Store the extracted data for copying
+                    setExtractedData(data.tables);
+
+                    setResult({
+                        success: true,
+                        message: `✅ Extracted ${found} table${found !== 1 ? 's' : ''}!`,
+                        details: `Found ${totalRows} total rows across ${found} table${found !== 1 ? 's' : ''}.`
+                    });
+                }
+            } else {
+                setResult({
+                    success: false,
+                    message: `❌ ${response.error || response.data?.error || 'Failed to extract tables'}`,
+                });
+                setExtractedData(null);
+            }
+        } catch (error: any) {
+            setResult({
+                success: false,
+                message: `❌ Error: ${error.message}`,
+            });
+            setExtractedData(null);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleCopyData = async () => {
+        if (!extractedData) return;
+
+        try {
+            const jsonData = JSON.stringify(extractedData, null, 2);
+            await navigator.clipboard.writeText(jsonData);
+            setResult({
+                success: true,
+                message: '✅ Copied table data to clipboard!',
+                details: `${extractedData.length} table${extractedData.length !== 1 ? 's' : ''} copied as JSON`
+            });
+        } catch (error: any) {
+            setResult({
+                success: false,
+                message: `❌ Failed to copy: ${error.message}`,
+            });
+        }
+    };
+
+    const handleFindLinks = async () => {
+        setLoading(true);
+        setResult(null);
+        setExtractedData(null);
+
+        try {
+            const response = await (globalThis as any).chrome.runtime.sendMessage({
+                type: MessageType.EXECUTE_TOOL,
+                payload: { tool: 'findAllLinks', args: {} }
+            });
+
+            if (response.success && response.data.success) {
+                const data = response.data.data;
+                const total = data.total || 0;
+
+                if (total === 0) {
+                    setResult({
+                        success: false,
+                        message: '❌ No links found on this page',
+                    });
+                    setExtractedData(null);
+                } else {
+                    // Store the extracted data for copying
+                    setExtractedData(data);
+
+                    setResult({
+                        success: true,
+                        message: `✅ Found ${total} link${total !== 1 ? 's' : ''}!`,
+                        details: `${data.internal} internal, ${data.external} external from ${Object.keys(data.byDomain).length} domains`
+                    });
+                }
+            } else {
+                setResult({
+                    success: false,
+                    message: `❌ ${response.error || response.data?.error || 'Failed to find links'}`,
+                });
+                setExtractedData(null);
+            }
+        } catch (error: any) {
+            setResult({
+                success: false,
+                message: `❌ Error: ${error.message}`,
+            });
+            setExtractedData(null);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleExtractPrices = async () => {
+        setLoading(true);
+        setResult(null);
+        setExtractedData(null);
+
+        try {
+            const response = await (globalThis as any).chrome.runtime.sendMessage({
+                type: MessageType.EXECUTE_TOOL,
+                payload: { tool: 'extractPrices', args: {} }
+            });
+
+            if (response.success && response.data.success) {
+                const data = response.data.data;
+                const found = data.found || 0;
+
+                if (found === 0) {
+                    setResult({
+                        success: false,
+                        message: '❌ No prices found on this page',
+                    });
+                    setExtractedData(null);
+                } else {
+                    // Store the extracted data for copying
+                    setExtractedData(data.prices);
+
+                    // Get price range
+                    const highest = data.prices[0];
+                    const lowest = data.prices[data.prices.length - 1];
+
+                    setResult({
+                        success: true,
+                        message: `✅ Found ${found} price${found !== 1 ? 's' : ''}!`,
+                        details: `Range: ${lowest.formatted} - ${highest.formatted}`
+                    });
+                }
+            } else {
+                setResult({
+                    success: false,
+                    message: `❌ ${response.error || response.data?.error || 'Failed to extract prices'}`,
+                });
+                setExtractedData(null);
+            }
+        } catch (error: any) {
+            setResult({
+                success: false,
+                message: `❌ Error: ${error.message}`,
+            });
+            setExtractedData(null);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleFindContacts = async () => {
+        setLoading(true);
+        setResult(null);
+        setExtractedData(null);
+
+        try {
+            const response = await (globalThis as any).chrome.runtime.sendMessage({
+                type: MessageType.EXECUTE_TOOL,
+                payload: { tool: 'findContactInfo', args: {} }
+            });
+
+            if (response.success && response.data.success) {
+                const data = response.data.data;
+                const total = data.total || 0;
+
+                if (total === 0) {
+                    setResult({
+                        success: false,
+                        message: '❌ No contact info found on this page',
+                    });
+                    setExtractedData(null);
+                } else {
+                    // Store the extracted data for copying
+                    setExtractedData(data);
+
+                    setResult({
+                        success: true,
+                        message: `✅ Found ${total} contact${total !== 1 ? 's' : ''}!`,
+                        details: `${data.emailCount} email${data.emailCount !== 1 ? 's' : ''}, ${data.phoneCount} phone${data.phoneCount !== 1 ? 's' : ''}`
+                    });
+                }
+            } else {
+                setResult({
+                    success: false,
+                    message: `❌ ${response.error || response.data?.error || 'Failed to find contact info'}`,
+                });
+                setExtractedData(null);
+            }
+        } catch (error: any) {
+            setResult({
+                success: false,
+                message: `❌ Error: ${error.message}`,
+            });
+            setExtractedData(null);
+            handler: handleAutoFill
+        },
+        {
+            id: 'summarize',
+                icon: <FileText className="w-6 h-6" />,
+                    title: 'Summarize Page',
+                        description: 'Get an AI-generated summary of this page',
+                            handler: handleSummarize
+        },
+        {
+            id: 'tables',
+                icon: <Table className="w-6 h-6" />,
+                    title: 'Extract Tables',
+                        description: 'Find and extract all data tables',
+                            handler: handleExtractTables
+        },
+        {
+            id: 'links',
+                icon: <Link className="w-6 h-6" />,
+                    title: 'Find All Links',
+                        description: 'Categorize and list all links on this page',
+                            handler: handleFindLinks
+        },
+        {
+            id: 'prices',
+                icon: <DollarSign className="w-6 h-6" />,
+                    title: 'Extract Prices',
+                        description: 'Find all prices and monetary values',
+                            handler: handleExtractPrices
+        },
+        {
+            id: 'contacts',
+                icon: <Mail className="w-6 h-6" />,
+                    title: 'Find Contact Info',
+                        description: 'Extract emails, phone numbers, and addresses',
+                            handler: handleFindContacts
+        },
+    ];
+
+return (
+    <div className="space-y-4">
+        {/* Header */}
+        <motion.div
+            className="glass-card p-4"
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+        >
+            <div className="flex items-center gap-2 mb-2">
+                <Sparkles className="w-5 h-5 text-violet-400" />
+                <h2 className="text-lg font-semibold text-gray-200">Smart Actions</h2>
+            </div>
+            <p className="text-xs text-gray-400">
+                One-click automations that work on any webpage
+            </p>
+        </motion.div>
+
+        {/* Result Display */}
+        {result && (
+            <motion.div
+                className={`glass-card p-3 ${result.success ? 'border-green-500/30' : 'border-yellow-500/30'}`}
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+            >
+                <p className="text-sm text-gray-200">{result.message}</p>
+                {result.details && (
+                    <p className="text-xs text-gray-400 mt-1">{result.details}</p>
+                )}
+                {extractedData && (
+                    <button
+                        onClick={handleCopyData}
+                        className="mt-2 px-3 py-1.5 bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/50 rounded text-xs text-cyan-300 transition-all"
+                    >
+                        📋 Copy Data
+                    </button>
+                )}
+            </motion.div>
+        )}
+
+        {/* Action Cards */}
+        <div className="space-y-2">
+            {actions.map((action, index) => (
+                <motion.div
+                    key={action.id}
+                    className="glass-card p-4 hover:bg-white/5 transition-all cursor-pointer"
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: index * 0.05 }}
+                    onClick={action.handler}
+                >
+                    <div className="flex items-start gap-3">
+                        <div className="text-cyan-400 flex-shrink-0">
+                            {action.icon}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <h3 className="text-sm font-medium text-gray-200 mb-1">
+                                {action.title}
+                            </h3>
+                            <p className="text-xs text-gray-400">
+                                {action.description}
+                            </p>
+                        </div>
+                        {loading && result === null ? (
+                            <div className="w-5 h-5 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+                        ) : (
+                            <div className="text-gray-500 text-xl">→</div>
+                        )}
+                    </div>
+                </motion.div>
+            ))}
+        </div>
+    </div>
+);
+};
+
+export default ActionsTab;

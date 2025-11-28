@@ -1,0 +1,118 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-base-muted/20;
+  }
+
+  html,
+  body {
+    @apply bg-base-bg text-base-text font-sans antialiased;
+    width: 480px;
+    height: 600px;
+    min-width: 480px;
+    min-height: 600px;
+    max-width: 480px;
+    max-height: 600px;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  #root {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  ::-webkit-scrollbar {
+    @apply w-2;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-base-bg;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-base-muted/30 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-base-muted/50;
+  }
+}
+
+@layer utilities {
+
+  /* Glass effects */
+  .glass {
+    @apply bg-base-card/50 backdrop-blur-xl border border-white/10;
+  }
+
+  .glass-card {
+    @apply bg-base-card/70 backdrop-blur-xl border border-white/10 rounded-xl;
+  }
+
+  /* Input fields - WHITE TEXT on DARK background for visibility! */
+  .input-field {
+    @apply w-full px-4 py-2.5 rounded-lg;
+    @apply bg-gray-800 border-2 border-gray-600;
+    @apply text-white placeholder-gray-400 text-sm;
+    @apply focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-violet-500;
+    @apply transition-all duration-200;
+  }
+
+  .input-field:hover {
+    @apply border-gray-500;
+  }
+
+  .input-field:focus {
+    @apply bg-gray-900 border-violet-500;
+  }
+
+  /* Buttons with proper contrast */
+  .btn-primary {
+    @apply flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg;
+    @apply bg-gradient-to-r from-violet-600 to-cyan-600;
+    @apply text-white font-medium text-sm;
+    @apply hover:from-violet-500 hover:to-cyan-500;
+    @apply active:scale-95;
+    @apply transition-all duration-200;
+    @apply shadow-lg shadow-violet-500/30;
+  }
+
+  .btn-secondary {
+    @apply flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg;
+    @apply bg-gray-700 text-white font-medium text-sm;
+    @apply hover:bg-gray-600;
+    @apply active:scale-95;
+    @apply transition-all duration-200;
+  }
+
+  .btn-danger {
+    @apply flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg;
+    @apply bg-red-600 text-white font-medium text-sm;
+    @apply hover:bg-red-500;
+    @apply active:scale-95;
+    @apply transition-all duration-200;
+    @apply shadow-lg shadow-red-500/30;
+  }
+
+  /* Text gradient */
+  .gradient-text {
+    @apply bg-gradient-to-r from-accent-violet via-accent-cyan to-accent-mint bg-clip-text text-transparent;
+  }
+
+  /* Background gradient */
+  .gradient-bg {
+    background: linear-gradient(135deg,
+        rgba(139, 92, 246, 0.1) 0%,
+        rgba(34, 211, 238, 0.1) 50%,
+        rgba(52, 211, 153, 0.1) 100%);
+    background-size: 200% 200%;
+  }
+}
