@@ -13,6 +13,13 @@ As a developer who frequently works with web scraping, data extraction, and brow
 
 **Lumina** leverages the power of Google's Gemini AI to understand natural language queries and execute complex web automation tasks, making it accessible to both technical and non-technical users.
 
+## 🎬 Demo
+
+![Lumina Demo](demo/Lumina_gif.gif)
+
+**[📺 Watch Full Demo Video](demo/Lumina_Demo.mp4)**
+
+
 ## ✨ Key Features
 
 ### 🤖 AI-Powered Intelligence
@@ -231,9 +238,7 @@ agentic-web-assistant/
 - **API Key Security**: Keys never leave the user's device
 - **Minimal Permissions**: Only requests necessary Chrome permissions
 
-## 🎨 Screenshots
 
-*Coming soon - Extension in action*
 
 ## 🛣️ Roadmap
 
